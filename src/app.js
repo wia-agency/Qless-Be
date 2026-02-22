@@ -24,13 +24,23 @@ initSocket(server);
 app.use(cors());
 app.use(express.json());
 
-// Swagger UI
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customSiteTitle: 'Qless API Docs',
-  swaggerOptions: {
-    persistAuthorization: true,
-  },
-}));
+// Swagger UI — load assets from CDN to avoid MIME type issues on Render/proxied hosts
+const SWAGGER_UI_VERSION = '5.17.14';
+app.use(
+  '/api-docs',
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    customSiteTitle: 'Qless API Docs',
+    customCssUrl: `https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/${SWAGGER_UI_VERSION}/swagger-ui.min.css`,
+    customJs: [
+      `https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/${SWAGGER_UI_VERSION}/swagger-ui-bundle.min.js`,
+      `https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/${SWAGGER_UI_VERSION}/swagger-ui-standalone-preset.min.js`,
+    ],
+    swaggerOptions: {
+      persistAuthorization: true,
+    },
+  })
+);
 
 // Expose raw OpenAPI spec as JSON (useful for mobile team to import into Postman etc.)
 app.get('/api-docs.json', (req, res) => {
