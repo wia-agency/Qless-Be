@@ -1,10 +1,11 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
+const jwt = require('jsonwebtoken');
 const Order = require('../models/Order');
 const MenuItem = require('../models/MenuItem');
-const { auth, userAuth } = require('../middleware/auth');
 const Cart = require('../models/Cart');
 const User = require('../models/User');
+const { auth, userAuth } = require('../middleware/auth');
 const { emitQueueUpdate, emitOrderReady } = require('../socket');
 
 const router = express.Router();
@@ -36,6 +37,9 @@ const router = express.Router();
  *       properties:
  *         _id:
  *           type: string
+ *         userId:
+ *           type: string
+ *           nullable: true
  *         customerName:
  *           type: string
  *         items:
@@ -52,12 +56,38 @@ const router = express.Router();
  *           format: date-time
  */
 
+// ─── Helper: extract user from token if present (non-blocking) ────────────────
+// Used to optionally link an order to a user without requiring auth
+const extractUser = (req) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+    const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+    return decoded.type === 'user' ? decoded : null;
+  } catch {
+    return null;
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: All static/specific routes must come BEFORE parameterized routes
+// like /:id and /:id/status, otherwise Express will match them as IDs.
+// Order: POST /, POST /from-cart, GET /, GET /history, GET /my, GET /:id, PATCH /:id/status
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * @swagger
  * /api/orders:
  *   post:
- *     summary: Place a new order (public — used by mobile app)
+ *     summary: Place a new order with explicit items (works for guests and logged-in users)
  *     tags: [Orders]
+ *     description: |
+ *       If a valid user token is provided in the Authorization header, the order will be
+ *       linked to that user (userId set) and their cart will be cleared automatically.
+ *       Without a token, the order is placed as a guest (userId = null, cart unaffected).
+ *     security:
+ *       - {}
+ *       - userAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -110,7 +140,6 @@ router.post(
 
     const { customerName, items } = req.body;
 
-    // Validate items and build order items with price snapshots
     const orderItems = [];
     let totalAmount = 0;
 
@@ -132,15 +161,103 @@ router.post(
       });
     }
 
-    const order = await Order.create({ customerName, items: orderItems, totalAmount });
+    // If a valid user token is present, link the order and clear their cart
+    const tokenUser = extractUser(req);
+    let userId = null;
+
+    if (tokenUser) {
+      userId = tokenUser.id;
+      const cart = await Cart.findOne({ userId: tokenUser.id });
+      if (cart) {
+        cart.items = [];
+        await cart.save();
+      }
+    }
+
+    const order = await Order.create({ userId, customerName, items: orderItems, totalAmount });
     const queuePosition = await order.getQueuePosition();
 
-    // Notify all connected clients that a new order joined the queue
     emitQueueUpdate();
 
     res.status(201).json({ order, queuePosition });
   }
 );
+
+/**
+ * @swagger
+ * /api/orders/from-cart:
+ *   post:
+ *     summary: Place an order from the user's cart (clears cart on success)
+ *     tags: [Orders]
+ *     security:
+ *       - userAuth: []
+ *     responses:
+ *       201:
+ *         description: Order placed from cart
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 order:
+ *                   $ref: '#/components/schemas/Order'
+ *                 queuePosition:
+ *                   type: integer
+ *       400:
+ *         description: Cart is empty or contains unavailable items
+ *       401:
+ *         description: Unauthorized (user token required)
+ */
+router.post('/from-cart', userAuth, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found.' });
+
+  const cart = await Cart.findOne({ userId: req.user.id });
+  if (!cart || cart.items.length === 0) {
+    return res.status(400).json({ message: 'Your cart is empty.' });
+  }
+
+  const orderItems = [];
+  let totalAmount = 0;
+
+  for (const cartItem of cart.items) {
+    const menuItem = await MenuItem.findById(cartItem.menuItemId);
+    if (!menuItem) {
+      return res.status(400).json({
+        message: `A cart item (ID: ${cartItem.menuItemId}) no longer exists. Please refresh your cart.`,
+      });
+    }
+    if (!menuItem.isAvailable) {
+      return res.status(400).json({
+        message: `"${menuItem.name}" is currently unavailable. Remove it from your cart to continue.`,
+      });
+    }
+    const lineTotal = menuItem.price * cartItem.quantity;
+    totalAmount += lineTotal;
+    orderItems.push({
+      menuItemId: menuItem._id,
+      name: menuItem.name,
+      quantity: cartItem.quantity,
+      price: menuItem.price,
+    });
+  }
+
+  const order = await Order.create({
+    userId: user._id,
+    customerName: user.name,
+    items: orderItems,
+    totalAmount,
+  });
+
+  const queuePosition = await order.getQueuePosition();
+
+  cart.items = [];
+  await cart.save();
+
+  emitQueueUpdate();
+
+  res.status(201).json({ order, queuePosition });
+});
 
 /**
  * @swagger
@@ -206,9 +323,7 @@ router.get('/', auth, async (req, res) => {
 router.get('/history', auth, async (req, res) => {
   const filter = {};
 
-  if (req.query.status) {
-    filter.status = req.query.status;
-  }
+  if (req.query.status) filter.status = req.query.status;
 
   if (req.query.date) {
     const start = new Date(req.query.date);
@@ -223,9 +338,59 @@ router.get('/history', auth, async (req, res) => {
 
 /**
  * @swagger
+ * /api/orders/my:
+ *   get:
+ *     summary: Get all orders placed by the current user
+ *     tags: [Orders]
+ *     security:
+ *       - userAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, preparing, ready, completed]
+ *         description: Filter by order status
+ *     responses:
+ *       200:
+ *         description: List of the user's orders (most recent first) with live queue positions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 allOf:
+ *                   - $ref: '#/components/schemas/Order'
+ *                   - type: object
+ *                     properties:
+ *                       queuePosition:
+ *                         type: integer
+ *                         nullable: true
+ *       401:
+ *         description: Unauthorized (user token required)
+ */
+router.get('/my', userAuth, async (req, res) => {
+  const filter = { userId: req.user.id };
+  if (req.query.status) filter.status = req.query.status;
+
+  const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(50);
+
+  const result = await Promise.all(
+    orders.map(async (order) => {
+      const isActive = ['pending', 'preparing'].includes(order.status);
+      const queuePosition = isActive ? await order.getQueuePosition() : null;
+      return { ...order.toObject(), queuePosition };
+    })
+  );
+
+  res.json(result);
+});
+
+/**
+ * @swagger
  * /api/orders/{id}:
  *   get:
- *     summary: Get order status and current queue position (public — used by mobile app)
+ *     summary: Get order status and current queue position (public)
  *     tags: [Orders]
  *     parameters:
  *       - in: path
@@ -246,7 +411,7 @@ router.get('/history', auth, async (req, res) => {
  *                 queuePosition:
  *                   type: integer
  *                   nullable: true
- *                   description: Position in queue (null if order is ready/completed)
+ *                   description: null when order is ready or completed
  *       404:
  *         description: Order not found
  */
@@ -285,7 +450,7 @@ router.get('/:id', async (req, res) => {
  *               status:
  *                 type: string
  *                 enum: [preparing, ready, completed]
- *                 description: "Status must follow the flow: pending → preparing → ready → completed"
+ *                 description: "Flow: pending → preparing → ready → completed"
  *     responses:
  *       200:
  *         description: Status updated, socket events emitted to all clients
@@ -339,133 +504,5 @@ router.patch(
     res.json(order);
   }
 );
-
-/**
- * @swagger
- * /api/orders/from-cart:
- *   post:
- *     summary: Place an order directly from the user's cart (clears cart on success)
- *     tags: [Orders]
- *     security:
- *       - userAuth: []
- *     responses:
- *       201:
- *         description: Order placed from cart
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 order:
- *                   $ref: '#/components/schemas/Order'
- *                 queuePosition:
- *                   type: integer
- *       400:
- *         description: Cart is empty or contains unavailable items
- *       401:
- *         description: Unauthorized (user token required)
- */
-router.post('/from-cart', userAuth, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found.' });
-
-  const cart = await Cart.findOne({ userId: req.user.id });
-  if (!cart || cart.items.length === 0) {
-    return res.status(400).json({ message: 'Your cart is empty.' });
-  }
-
-  const orderItems = [];
-  let totalAmount = 0;
-
-  for (const cartItem of cart.items) {
-    const menuItem = await MenuItem.findById(cartItem.menuItemId);
-    if (!menuItem) {
-      return res.status(400).json({
-        message: `A cart item (ID: ${cartItem.menuItemId}) no longer exists. Please refresh your cart.`,
-      });
-    }
-    if (!menuItem.isAvailable) {
-      return res.status(400).json({
-        message: `"${menuItem.name}" is currently unavailable. Remove it from your cart to continue.`,
-      });
-    }
-    const lineTotal = menuItem.price * cartItem.quantity;
-    totalAmount += lineTotal;
-    orderItems.push({
-      menuItemId: menuItem._id,
-      name: menuItem.name,
-      quantity: cartItem.quantity,
-      price: menuItem.price,
-    });
-  }
-
-  const order = await Order.create({
-    userId: user._id,
-    customerName: user.name,
-    items: orderItems,
-    totalAmount,
-  });
-
-  const queuePosition = await order.getQueuePosition();
-
-  // Clear the cart after successful order
-  cart.items = [];
-  await cart.save();
-
-  emitQueueUpdate();
-
-  res.status(201).json({ order, queuePosition });
-});
-
-/**
- * @swagger
- * /api/orders/my:
- *   get:
- *     summary: Get all orders placed by the current user
- *     tags: [Orders]
- *     security:
- *       - userAuth: []
- *     parameters:
- *       - in: query
- *         name: status
- *         schema:
- *           type: string
- *           enum: [pending, preparing, ready, completed]
- *         description: Filter by order status
- *     responses:
- *       200:
- *         description: List of the user's orders (most recent first)
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 allOf:
- *                   - $ref: '#/components/schemas/Order'
- *                   - type: object
- *                     properties:
- *                       queuePosition:
- *                         type: integer
- *                         nullable: true
- *       401:
- *         description: Unauthorized (user token required)
- */
-router.get('/my', userAuth, async (req, res) => {
-  const filter = { userId: req.user.id };
-  if (req.query.status) filter.status = req.query.status;
-
-  const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(50);
-
-  // Attach live queue position to active orders
-  const result = await Promise.all(
-    orders.map(async (order) => {
-      const isActive = ['pending', 'preparing'].includes(order.status);
-      const queuePosition = isActive ? await order.getQueuePosition() : null;
-      return { ...order.toObject(), queuePosition };
-    })
-  );
-
-  res.json(result);
-});
 
 module.exports = router;
