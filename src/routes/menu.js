@@ -30,6 +30,11 @@ const router = express.Router();
  *         category:
  *           type: string
  *           enum: [Main, Snack, Drink, Beverage, Dessert]
+ *         timeTaken:
+ *           type: integer
+ *           nullable: true
+ *           description: Estimated preparation time in minutes
+ *           example: 10
  *         isAvailable:
  *           type: boolean
  *         imageUrl:
@@ -48,6 +53,13 @@ const router = express.Router();
  *   get:
  *     summary: Get all available menu items (public)
  *     tags: [Menu]
+ *     parameters:
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *           enum: [Main, Snack, Drink, Beverage, Dessert]
+ *         description: Filter by category
  *     responses:
  *       200:
  *         description: List of available menu items
@@ -59,7 +71,9 @@ const router = express.Router();
  *                 $ref: '#/components/schemas/MenuItem'
  */
 router.get('/', async (req, res) => {
-  const items = await MenuItem.find({ isAvailable: true }).sort({ category: 1, name: 1 });
+  const filter = { isAvailable: true };
+  if (req.query.category) filter.category = req.query.category;
+  const items = await MenuItem.find(filter).sort({ category: 1, name: 1 });
   res.json(items);
 });
 
@@ -71,6 +85,13 @@ router.get('/', async (req, res) => {
  *     tags: [Menu]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *           enum: [Main, Snack, Drink, Beverage, Dessert]
+ *         description: Filter by category
  *     responses:
  *       200:
  *         description: Full list of menu items
@@ -84,7 +105,9 @@ router.get('/', async (req, res) => {
  *         description: Unauthorized
  */
 router.get('/all', auth, async (req, res) => {
-  const items = await MenuItem.find().sort({ category: 1, name: 1 });
+  const filter = {};
+  if (req.query.category) filter.category = req.query.category;
+  const items = await MenuItem.find(filter).sort({ category: 1, name: 1 });
   res.json(items);
 });
 
@@ -141,6 +164,11 @@ router.get('/:id', async (req, res) => {
  *               category:
  *                 type: string
  *                 enum: [Main, Snack, Drink, Beverage, Dessert]
+ *               timeTaken:
+ *                 type: integer
+ *                 minimum: 1
+ *                 description: Estimated preparation time in minutes
+ *                 example: 10
  *               isAvailable:
  *                 type: boolean
  *               imageUrl:
@@ -167,13 +195,16 @@ router.post(
     body('category')
       .isIn(['Main', 'Snack', 'Drink', 'Beverage', 'Dessert'])
       .withMessage('Invalid category'),
+    body('timeTaken')
+      .optional()
+      .isInt({ min: 1 }).withMessage('timeTaken must be a positive integer (minutes)'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { name, description, price, category, isAvailable, imageUrl } = req.body;
-    const item = await MenuItem.create({ name, description, price, category, isAvailable, imageUrl });
+    const { name, description, price, category, timeTaken, isAvailable, imageUrl } = req.body;
+    const item = await MenuItem.create({ name, description, price, category, timeTaken, isAvailable, imageUrl });
     res.status(201).json(item);
   }
 );
@@ -208,6 +239,11 @@ router.post(
  *               category:
  *                 type: string
  *                 enum: [Main, Snack, Drink, Beverage, Dessert]
+ *               timeTaken:
+ *                 type: integer
+ *                 minimum: 1
+ *                 description: Estimated preparation time in minutes
+ *                 example: 10
  *               isAvailable:
  *                 type: boolean
  *               imageUrl:
@@ -234,12 +270,15 @@ router.put(
       .optional()
       .isIn(['Main', 'Snack', 'Drink', 'Beverage', 'Dessert'])
       .withMessage('Invalid category'),
+    body('timeTaken')
+      .optional()
+      .isInt({ min: 1 }).withMessage('timeTaken must be a positive integer (minutes)'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const allowed = ['name', 'description', 'price', 'category', 'isAvailable', 'imageUrl'];
+    const allowed = ['name', 'description', 'price', 'category', 'timeTaken', 'isAvailable', 'imageUrl'];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
     );
