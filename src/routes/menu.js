@@ -167,7 +167,7 @@ router.get('/:id', async (req, res) => {
  *               timeTaken:
  *                 type: integer
  *                 minimum: 1
- *                 description: Estimated preparation time in minutes
+ *                 description: Estimated preparation time in minutes (required)
  *                 example: 10
  *               isAvailable:
  *                 type: boolean
@@ -196,7 +196,7 @@ router.post(
       .isIn(['Main', 'Snack', 'Drink', 'Beverage', 'Dessert'])
       .withMessage('Invalid category'),
     body('timeTaken')
-      .optional()
+      .notEmpty().withMessage('timeTaken (prep time in minutes) is required')
       .isInt({ min: 1 }).withMessage('timeTaken must be a positive integer (minutes)'),
   ],
   async (req, res) => {

@@ -158,6 +158,7 @@ router.post(
         name: menuItem.name,
         quantity: item.quantity,
         price: menuItem.price,
+        timeTaken: menuItem.timeTaken ?? null,
       });
     }
 
@@ -175,11 +176,11 @@ router.post(
     }
 
     const order = await Order.create({ userId, customerName, items: orderItems, totalAmount });
-    const queuePosition = await order.getQueuePosition();
+    const { position: queuePosition, estimatedMinutes } = await order.getQueuePosition();
 
     emitQueueUpdate();
 
-    res.status(201).json({ order, queuePosition });
+    res.status(201).json({ order, queuePosition, estimatedWaitMinutes: estimatedMinutes });
   }
 );
 
@@ -239,6 +240,7 @@ router.post('/from-cart', userAuth, async (req, res) => {
       name: menuItem.name,
       quantity: cartItem.quantity,
       price: menuItem.price,
+      timeTaken: menuItem.timeTaken ?? null,
     });
   }
 
@@ -249,14 +251,14 @@ router.post('/from-cart', userAuth, async (req, res) => {
     totalAmount,
   });
 
-  const queuePosition = await order.getQueuePosition();
+  const { position: queuePosition, estimatedMinutes } = await order.getQueuePosition();
 
   cart.items = [];
   await cart.save();
 
   emitQueueUpdate();
 
-  res.status(201).json({ order, queuePosition });
+  res.status(201).json({ order, queuePosition, estimatedWaitMinutes: estimatedMinutes });
 });
 
 /**
@@ -378,8 +380,9 @@ router.get('/my', userAuth, async (req, res) => {
   const result = await Promise.all(
     orders.map(async (order) => {
       const isActive = ['pending', 'preparing'].includes(order.status);
-      const queuePosition = isActive ? await order.getQueuePosition() : null;
-      return { ...order.toObject(), queuePosition };
+      if (!isActive) return { ...order.toObject(), queuePosition: null, estimatedWaitMinutes: null };
+      const { position, estimatedMinutes } = await order.getQueuePosition();
+      return { ...order.toObject(), queuePosition: position, estimatedWaitMinutes: estimatedMinutes };
     })
   );
 
@@ -420,9 +423,15 @@ router.get('/:id', async (req, res) => {
   if (!order) return res.status(404).json({ message: 'Order not found.' });
 
   const isActive = ['pending', 'preparing'].includes(order.status);
-  const queuePosition = isActive ? await order.getQueuePosition() : null;
+  let queuePosition = null;
+  let estimatedWaitMinutes = null;
+  if (isActive) {
+    const q = await order.getQueuePosition();
+    queuePosition = q.position;
+    estimatedWaitMinutes = q.estimatedMinutes;
+  }
 
-  res.json({ order, queuePosition });
+  res.json({ order, queuePosition, estimatedWaitMinutes });
 });
 
 /**

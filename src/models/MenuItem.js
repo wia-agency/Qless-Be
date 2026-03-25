@@ -10,7 +10,7 @@ const menuItemSchema = new mongoose.Schema(
       required: true,
       enum: ['Main', 'Snack', 'Drink', 'Beverage', 'Dessert'],
     },
-    timeTaken: { type: Number, min: 1, default: null }, // prep time in minutes
+    timeTaken: { type: Number, required: true, min: 1 }, // prep time in minutes — mandatory
     isAvailable: { type: Boolean, default: true },
     imageUrl: { type: String, trim: true },
   },
