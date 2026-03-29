@@ -281,7 +281,7 @@ router.post('/from-cart', userAuth, async (req, res) => {
  *       401:
  *         description: Unauthorized
  */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, async (_req, res) => {
   const orders = await Order.find({
     status: { $in: ['pending', 'preparing'] },
   }).sort({ createdAt: 1 });
@@ -513,5 +513,92 @@ router.patch(
     res.json(order);
   }
 );
+
+/**
+ * @swagger
+ * /api/orders/{id}/ready:
+ *   patch:
+ *     summary: Mark an order as ready (called from app after QR scan)
+ *     tags: [Orders]
+ *     security:
+ *       - userAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Order marked as ready
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       400:
+ *         description: Order cannot be moved to ready (already completed)
+ *       404:
+ *         description: Order not found
+ */
+/**
+ * @swagger
+ * /api/orders/{id}/cancel:
+ *   patch:
+ *     summary: Cancel an order (admin only) — only pending or preparing orders can be cancelled
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Order cancelled
+ *       400:
+ *         description: Order cannot be cancelled (already ready/completed/cancelled)
+ *       404:
+ *         description: Order not found
+ */
+router.patch('/:id/cancel', auth, requireRole('admin'), async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ message: 'Order not found.' });
+
+  if (!['pending', 'preparing'].includes(order.status)) {
+    return res.status(400).json({
+      message: `Cannot cancel an order with status "${order.status}".`,
+    });
+  }
+
+  order.status = 'cancelled';
+  await order.save();
+
+  emitQueueUpdate();
+
+  res.json(order);
+});
+
+router.patch('/:id/ready', userAuth, async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ message: 'Order not found.' });
+
+  if (order.status === 'completed') {
+    return res.status(400).json({ message: 'Order is already completed.' });
+  }
+
+  if (order.status === 'ready') {
+    return res.json(order);
+  }
+
+  order.status = 'ready';
+  await order.save();
+
+  emitOrderReady(order._id.toString());
+  emitQueueUpdate();
+
+  res.json(order);
+});
 
 module.exports = router;
