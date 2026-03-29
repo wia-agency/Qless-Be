@@ -5,7 +5,7 @@ const Order = require('../models/Order');
 const MenuItem = require('../models/MenuItem');
 const Cart = require('../models/Cart');
 const User = require('../models/User');
-const { auth, userAuth } = require('../middleware/auth');
+const { auth, userAuth, requireRole } = require('../middleware/auth');
 const { emitQueueUpdate, emitOrderReady } = require('../socket');
 
 const router = express.Router();
