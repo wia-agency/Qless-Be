@@ -283,7 +283,7 @@ router.post('/from-cart', userAuth, async (req, res) => {
  */
 router.get('/', auth, async (_req, res) => {
   const orders = await Order.find({
-    status: { $in: ['pending', 'preparing'] },
+    status: { $in: ['pending', 'preparing', 'ready'] },
   }).sort({ createdAt: 1 });
   res.json(orders);
 });
@@ -588,10 +588,19 @@ router.patch('/:id/ready', userAuth, async (req, res) => {
     return res.status(400).json({ message: 'Order is already completed.' });
   }
 
+  if (order.status === 'cancelled') {
+    return res.status(400).json({ message: 'Order is cancelled.' });
+  }
+
+  // QR scan on a ready order → complete it (customer confirmed pickup)
   if (order.status === 'ready') {
+    order.status = 'completed';
+    await order.save();
+    emitQueueUpdate();
     return res.json(order);
   }
 
+  // QR scan on pending/preparing → mark ready first
   order.status = 'ready';
   await order.save();
 
